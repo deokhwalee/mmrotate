@@ -1,0 +1,30 @@
+{
+  "nproc": 10,
+  "data_format": "YOLO",
+  "img_dirs": [
+      "/datasets/posco/images/train/"
+  ],
+  "ann_dirs": [
+      "/datasets/posco/labels/converted/"
+  ],
+  "sizes": [
+      640
+  ],
+  "gaps": [
+      100
+  ],
+  "rates": [
+      1.0
+  ],
+  "img_rate_thr": 0.6,
+  "iof_thr": 0.7,
+  "no_padding": false,
+  "padding_value": [
+      104,
+      116,
+      124
+  ],
+  "save_dir": "/datasets/posco/split_pile_yolo/",
+  "save_ext": ".tif"
+}
+  

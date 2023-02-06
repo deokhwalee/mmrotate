@@ -11,6 +11,7 @@ import logging
 import os
 import os.path as osp
 import time
+import sys
 from functools import partial, reduce
 from math import ceil
 from multiprocessing import Manager, Pool
@@ -38,6 +39,11 @@ def add_parser(parser):
         '--nproc', type=int, default=10, help='the procession number')
 
     # argument for loading data
+    parser.add_argument(
+        '--data-format',
+        type=str,
+        default=None,
+        help='choose data format to split')
     parser.add_argument(
         '--img-dirs',
         nargs='+',
@@ -122,6 +128,7 @@ def parse_args():
         args = parser.parse_args()
 
     # assert arguments
+    assert args.data_format is not None, "argument data_format can't be None"
     assert args.img_dirs is not None, "argument img_dirs can't be None"
     assert args.ann_dirs is None or len(args.ann_dirs) == len(args.img_dirs)
     assert len(args.sizes) == len(args.gaps)
@@ -129,8 +136,8 @@ def parse_args():
     assert args.save_ext in ['.png', '.jpg', 'bmp', '.tif']
     assert args.iof_thr >= 0 and args.iof_thr < 1
     assert args.iof_thr >= 0 and args.iof_thr <= 1
-    assert not osp.exists(args.save_dir), \
-        f'{osp.join(args.save_dir)} already exists'
+    # assert not osp.exists(args.save_dir), \
+    #     f'{osp.join(args.save_dir)} already exists'
     return args
 
 
@@ -310,6 +317,7 @@ def crop_and_save_img(info, windows, window_anns, img_dir, no_padding,
         patch_info['ori_id'] = info['id']
 
         ann = window_anns[i]
+        # translate() needs to be re-calculated for the YOLO format
         ann['bboxes'] = translate(ann['bboxes'], -x_start, -y_start)
         patch_info['ann'] = ann
 
@@ -342,9 +350,10 @@ def crop_and_save_img(info, windows, window_anns, img_dir, no_padding,
                 for idx in range(bboxes_num):
                     obj = patch_info['ann']
                     outline = ' '.join(list(map(str, obj['bboxes'][idx])))
-                    diffs = str(
-                        obj['diffs'][idx]) if not obj['trunc'][idx] else '2'
-                    outline = outline + ' ' + obj['labels'][idx] + ' ' + diffs
+                    # diffs = str(
+                    #     obj['diffs'][idx]) if not obj['trunc'][idx] else '2'
+                    # outline = outline + ' ' + obj['labels'][idx] + ' ' + diffs
+                    outline = outline + ' ' + obj['labels'][idx]
                     f_out.write(outline + '\n')
 
     return patch_infos
@@ -375,6 +384,9 @@ def single_split(arguments, sizes, gaps, img_rate_thr, iof_thr, no_padding,
         list[dict]: Information of paths.
     """
     info, img_dir = arguments
+    print("#"*20)
+    print(info)
+    print("#"*20)
     windows = get_sliding_window(info, sizes, gaps, img_rate_thr)
     window_anns = get_window_obj(info, windows, iof_thr)
     patch_infos = crop_and_save_img(info, windows, window_anns, img_dir,
@@ -485,8 +497,9 @@ def _load_dota_single(imgfile, img_dir, ann_dir):
     imgpath = osp.join(img_dir, imgfile)
     size = Image.open(imgpath).size
     txtfile = None if ann_dir is None else osp.join(ann_dir, img_id + '.txt')
+    assert osp.exists(txtfile)
     content = _load_dota_txt(txtfile)
-
+        
     content.update(
         dict(width=size[0], height=size[1], filename=imgfile, id=img_id))
     return content
@@ -503,12 +516,14 @@ def _load_dota_txt(txtfile):
     """
     gsd, bboxes, labels, diffs = None, [], [], []
     if txtfile is None:
+        print("txtfile is None")
         pass
     elif not osp.isfile(txtfile):
         print(f"Can't find {txtfile}, treated as empty txtfile")
     else:
         with open(txtfile, 'r') as f:
             for line in f:
+                # print(line)
                 if line.startswith('gsd'):
                     num = line.split(':')[-1]
                     try:
@@ -531,6 +546,95 @@ def _load_dota_txt(txtfile):
     return dict(gsd=gsd, ann=ann)
 
 
+def load_yolo(img_dir, ann_dir=None, nproc=10):
+    """Load DOTA dataset.
+
+    Args:
+        img_dir (str): Path of images.
+        ann_dir (str): Path of annotations.
+        nproc (int): number of processes.
+
+    Returns:
+        list: Dataset's contents.
+    """
+    assert osp.isdir(img_dir), f'The {img_dir} is not an existing dir!'
+    assert ann_dir is None or osp.isdir(
+        ann_dir), f'The {ann_dir} is not an existing dir!'
+
+    print('Starting loading DOTA dataset information.')
+    start_time = time.time()
+    _load_func = partial(_load_yolo_single, img_dir=img_dir, ann_dir=ann_dir)
+    if nproc > 1:
+        pool = Pool(nproc)
+        contents = pool.map(_load_func, os.listdir(img_dir))
+        pool.close()
+    else:
+        contents = list(map(_load_func, os.listdir(img_dir)))
+    contents = [c for c in contents if c is not None]
+    end_time = time.time()
+    print(f'Finishing loading YOLO, get {len(contents)} iamges,',
+          f'using {end_time - start_time:.3f}s.')
+
+    return contents
+
+
+def _load_yolo_single(imgfile, img_dir, ann_dir):
+    """Load YOLO's single image.
+
+    Args:
+        imgfile (str): Filename of single image.
+        img_dir (str): Path of images.
+        ann_dir (str): Path of annotations.
+
+    Returns:
+        dict: Content of single image.
+    """
+    img_id, ext = osp.splitext(imgfile)
+    if ext not in ['.jpg', '.JPG', '.png', '.tif', '.bmp']:
+        return None
+
+    imgpath = osp.join(img_dir, imgfile)
+    size = Image.open(imgpath).size
+    txtfile = None if ann_dir is None else osp.join(ann_dir, img_id + '.txt')
+    assert osp.exists(txtfile)
+    content = _load_yolo_txt(txtfile)
+        
+    content.update(
+        dict(width=size[0], height=size[1], filename=imgfile, id=img_id))
+    return content
+
+
+def _load_yolo_txt(txtfile):
+    """Load YOLO's txt annotation.
+
+    Args:
+        txtfile (str): Filename of single txt annotation.
+
+    Returns:
+        dict: Annotation of single image.
+    """
+    bboxes, labels = [], []
+    if txtfile is None:
+        print("txtfile is None")
+        pass
+    elif not osp.isfile(txtfile):
+        print(f"Can't find {txtfile}, treated as empty txtfile")
+    else:
+        print('txtfile is Good')
+        with open(txtfile, 'r') as f:
+            for line in f:
+                # print(line)
+
+                items = line.split(' ')
+                bboxes.append([float(i) for i in items[1:]])
+                labels.append(items[0])
+
+    bboxes = np.array(bboxes, dtype=np.float32) if bboxes else \
+        np.zeros((0, 4), dtype=np.float32)
+    ann = dict(bboxes=bboxes, labels=labels)
+    return dict(ann=ann)
+
+
 def main():
     """Main function of image split."""
     args = parse_args()
@@ -545,17 +649,31 @@ def main():
         gaps += [int(gap / rate) for gap in args.gaps]
     save_imgs = osp.join(args.save_dir, 'images')
     save_files = osp.join(args.save_dir, 'annfiles')
-    os.makedirs(save_imgs)
-    os.makedirs(save_files)
+    os.makedirs(save_imgs, exist_ok=True)
+    os.makedirs(save_files, exist_ok=True)
     logger = setup_logger(args.save_dir)
 
     print('Loading original data!!!')
     infos, img_dirs = [], []
-    for img_dir, ann_dir in zip(args.img_dirs, args.ann_dirs):
-        _infos = load_dota(img_dir=img_dir, ann_dir=ann_dir, nproc=args.nproc)
-        _img_dirs = [img_dir for _ in range(len(_infos))]
-        infos.extend(_infos)
-        img_dirs.extend(_img_dirs)
+    data_format = args.data_format
+
+    if data_format == "DOTA":
+        print('DOTA dataset processing')
+        for img_dir, ann_dir in zip(args.img_dirs, args.ann_dirs):
+            _infos = load_dota(img_dir=img_dir, ann_dir=ann_dir, nproc=args.nproc)
+            _img_dirs = [img_dir for _ in range(len(_infos))]
+            infos.extend(_infos)
+            img_dirs.extend(_img_dirs)
+    elif data_format == "YOLO":
+        print('YOLO dataset processing')
+        for img_dir, ann_dir in zip(args.img_dirs, args.ann_dirs):
+            _infos = load_yolo(img_dir=img_dir, ann_dir=ann_dir, nproc=args.nproc)
+            _img_dirs = [img_dir for _ in range(len(_infos))]
+            infos.extend(_infos)
+            img_dirs.extend(_img_dirs)
+    else:
+        print("No data format available")
+        sys.exit()
 
     print('Start splitting images!!!')
     start = time.time()
